@@ -55,15 +55,23 @@ def main() -> None:
     ds = MITBIHDataset(args.mitbih_root, signal_length=1000)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    encoder = ECGEncoder1DCNN(in_ch=1, width=64)
+    # Create encoder with 12 channels to match PTB-XL training format
+    # (MIT-BIH signals are replicated across 12 channels for transfer learning consistency)
+    encoder = ECGEncoder1DCNN(in_ch=12, width=64)
     ckpt = torch.load(args.checkpoint, map_location="cpu")
 
-    if args.use_ssl:
+    # Handle both pure SSL checkpoints (with "encoder" key) and fine-tuned checkpoints (with "model" key)
+    if "encoder" in ckpt:
         encoder.load_state_dict(ckpt["encoder"])
-    else:
+    elif "model" in ckpt:
         full_model_state = ckpt["model"]
         encoder_state = {k.replace("encoder.", ""): v for k, v in full_model_state.items() if k.startswith("encoder.")}
-        encoder.load_state_dict(encoder_state)
+        if encoder_state:  # Successfully extracted encoder
+            encoder.load_state_dict(encoder_state)
+        else:
+            raise ValueError("Could not extract encoder from checkpoint. Ensure it's a valid model checkpoint.")
+    else:
+        raise ValueError(f"Unknown checkpoint format. Expected 'encoder' or 'model' key, got: {list(ckpt.keys())}")
 
     model = ECGClassifier(encoder=encoder, n_classes=1).to(device)
 
