@@ -58,7 +58,6 @@ runs/
 *.pkl
 
 # Output figures
-figures/
 results/
 
 # Temporary files

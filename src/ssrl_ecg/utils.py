@@ -16,7 +16,38 @@ def set_seed(seed: int) -> None:
 
 
 def choose_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    """Choose optimal device (GPU if available, else CPU) and configure it."""
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        
+        # Enable GPU memory optimization
+        torch.cuda.set_per_process_memory_fraction(0.95, device=device)  # Use 95% of GPU memory
+        torch.cuda.empty_cache()  # Clear cache before training
+        
+        # Print GPU info
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+        cuda_version = torch.version.cuda
+        cudnn_version = torch.backends.cudnn.version()
+        
+        print(f"\n[GPU CONFIGURATION]")
+        print(f"  Device: {gpu_name}")
+        print(f"  GPU Memory: {gpu_memory:.1f} GB")
+        print(f"  CUDA Version: {cuda_version}")
+        print(f"  cuDNN Version: {cudnn_version}")
+        print(f"  PyTorch Version: {torch.__version__}")
+        
+        # Enable cuDNN auto-tuner for optimal performance
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False  # Trade determinism for speed
+        
+        print(f"  [STATUS] Using GPU mode - optimal for RTX 5070 Ti\n")
+        return device
+    else:
+        print("\n[GPU CONFIGURATION]")
+        print("  [WARNING] No CUDA-capable GPU detected!")
+        print("  [STATUS] Falling back to CPU mode - training will be slow\n")
+        return torch.device("cpu")
 
 
 def multilabel_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> Dict[str, float]:

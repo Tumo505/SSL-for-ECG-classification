@@ -10,6 +10,8 @@ from tqdm import tqdm
 
 from ssrl_ecg.data.ptbxl import PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits, sample_labelled_indices
 from ssrl_ecg.models.cnn import ECGClassifier, ECGEncoder1DCNN
+from ssrl_ecg.models.losses import FocalLoss, WeightedBCELoss, ClassBalancedLoss, compute_class_weights
+from ssrl_ecg.data.balancing import create_balanced_dataloader, report_class_imbalance
 from ssrl_ecg.utils import choose_device, multilabel_metrics, set_seed
 
 
@@ -25,6 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-encoder", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=Path, default=Path("checkpoints/finetuned.pt"))
+    parser.add_argument("--loss", type=str, default="focal", choices=["bce", "focal", "weighted", "class_balanced"],
+                       help="Loss function to use")
+    parser.add_argument("--balance-strategy", type=str, default="oversample", choices=["standard", "stratified", "oversample"],
+                       help="Data balancing strategy")
     return parser.parse_args()
 
 
@@ -56,7 +62,17 @@ def main() -> None:
     train_ds = PTBXLRecordDataset(args.data_root, db_df, labels, sampled_train_idx, signal_length=args.signal_length)
     val_ds = PTBXLRecordDataset(args.data_root, db_df, labels, splits.val_idx, signal_length=args.signal_length)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    train_labels = labels[sampled_train_idx]
+    
+    # Report class imbalance
+    print("\n[TRAIN SET CLASS DISTRIBUTION]")
+    report_class_imbalance(train_labels, "Training Set")
+
+    # Create balanced data loaders
+    train_loader = create_balanced_dataloader(
+        train_ds, train_labels, batch_size=args.batch_size,
+        strategy=args.balance_strategy, shuffle=True, num_workers=0
+    )
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     encoder = ECGEncoder1DCNN(in_ch=12, width=64)
@@ -69,7 +85,26 @@ def main() -> None:
             p.requires_grad = False
 
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-    criterion = torch.nn.BCEWithLogitsLoss()
+    
+    # Select loss function
+    print(f"\n[LOSS CONFIGURATION]")
+    print(f"  Loss function: {args.loss}")
+    print(f"  Balancing strategy: {args.balance_strategy}")
+    
+    if args.loss == "focal":
+        criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
+    elif args.loss == "weighted":
+        class_weights = compute_class_weights(train_labels, method="inverse_frequency").to(device)
+        criterion = WeightedBCELoss(class_weights=class_weights, reduction="mean")
+    elif args.loss == "class_balanced":
+        if not isinstance(train_labels, torch.Tensor):
+            train_labels_tensor = torch.from_numpy(train_labels).float()
+        else:
+            train_labels_tensor = train_labels
+        class_counts = (train_labels_tensor == 1).sum(dim=0)
+        criterion = ClassBalancedLoss(class_counts, beta=0.9999, reduction="mean")
+    else:
+        criterion = torch.nn.BCEWithLogitsLoss()
 
     best_f1 = -1.0
     best_state = None

@@ -17,7 +17,13 @@ dependencies = [
     "wfdb>=4.1",
     "pyyaml>=6.0",
     "matplotlib>=3.5",
+    "seaborn>=0.12",
+    "scipy>=1.10",
+    "xgboost>=2.0",
+    "lightgbm>=4.0",
 ]
 
 [project.optional-dependencies]
 dev = ["black>=23.0", "pytest>=7.0"]
+ml = ["xgboost>=2.0", "lightgbm>=4.0", "statsmodels>=0.14"]
+analysis = ["scipy>=1.10", "seaborn>=0.12", "statsmodels>=0.14"]
