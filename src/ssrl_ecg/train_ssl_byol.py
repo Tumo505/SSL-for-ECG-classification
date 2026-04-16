@@ -11,44 +11,20 @@ from tqdm import tqdm
 from ssrl_ecg.data.ptbxl import PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits
 from ssrl_ecg.models.cnn import ECGEncoder1DCNN
 from ssrl_ecg.utils import choose_device, set_seed
+from ssrl_ecg.augmentations import ECGAugmentations  # Use enhanced augmentations
 
 
 class BYOLAugmentations:
-    """Simple augmentations for BYOL."""
+    """Wrapper for enhanced ECG augmentations."""
     
-    def __init__(self, signal_length=1000, prob=0.7):
+    def __init__(self, signal_length=5000, prob=0.8):
         self.signal_length = signal_length
+        self.augmentations = ECGAugmentations(signal_length=signal_length, prob_strong=prob)
         self.prob = prob
     
     def __call__(self, x):
-        """Return two augmented views."""
-        x1 = self._augment(x.clone())
-        x2 = self._augment(x.clone())
-        return x1, x2
-    
-    def _augment(self, x):
-        """Apply random augmentations."""
-        # Random time shift
-        if torch.rand(1).item() < self.prob:
-            shift = torch.randint(-50, 51, (1,)).item()
-            if shift > 0:
-                # Pad left with zeros, keep right part: [batch, channels, time]
-                x = torch.cat([torch.zeros_like(x[:, :, :shift]), x[:, :, :self.signal_length-shift]], dim=2)
-            elif shift < 0:
-                # Keep left part, pad right with zeros
-                x = torch.cat([x[:, :, -shift:self.signal_length], torch.zeros_like(x[:, :, :shift])], dim=2)
-        
-        # Random scaling
-        if torch.rand(1).item() < self.prob:
-            scale = (torch.randn(1) * 0.1 + 1.0).item()
-            x = x * scale
-        
-        # Random jitter
-        if torch.rand(1).item() < self.prob:
-            jitter = torch.randn_like(x) * 0.05
-            x = x + jitter
-        
-        return x
+        """Return two augmented views using advanced augmentations."""
+        return self.augmentations(x)
 
 
 class BYOLProjector(nn.Module):

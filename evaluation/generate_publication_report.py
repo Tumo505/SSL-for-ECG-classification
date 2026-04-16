@@ -134,35 +134,6 @@ def main():
     
     # Generate summary
     generate_combined_summary(phase2_path)
-    
-    print("\n" + "="*70)
-    print("NEXT STEPS FOR PUBLICATION")
-    print("="*70)
-    print("""
-1. [OK] Phase 1: Class imbalance addressed (Focal Loss + Oversampling)
-   - HYP class AUROC: +5.86% improvement
-   - Macro F1: +1.65% improvement
-
-2. ⏳ Phase 2: Statistical rigor established
-   - 10-seed experiments running
-   - Significance testing to confirm p < 0.05
-
-3. ⏳ Phase 3: Baseline comparisons
-   - SimCLR SSL pre-training baseline
-   - BYOL SSL alternative
-   - ResNet-1D architectural comparison
-
-4. 📝 Publication sections ready:
-   - Methods: Loss functions and balancing strategies
-   - Results: Multi-seed performance with statistics
-   - Comparison: Baselines showing improvements
-   - Ablation: Loss function effectiveness analysis
-
-5. [TARGET] Target metrics achieved:
-   - Macro AUROC > 0.85 [OK]
-   - Underrepresented class (HYP) >0.60 [OK] (0.7429)
-   - Statistical significance p<0.05 (Phase 2 pending)
-   """)
 
 
 if __name__ == "__main__":

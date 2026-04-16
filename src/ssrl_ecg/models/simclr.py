@@ -123,58 +123,28 @@ class NTXentLoss(nn.Module):
 
 
 class SimCLRAugmentations:
-    """Augmentation pipeline for ECG signals in SimCLR."""
+    """Enhanced augmentation pipeline for ECG signals in SimCLR."""
     
-    def __init__(self, signal_length: int = 1000, prob: float = 0.5):
+    def __init__(self, signal_length: int = 5000, prob: float = 0.8):
         """
         Args:
             signal_length: Length of ECG signal
-            prob: Probability of applying each augmentation
+            prob: Probability of applying strong augmentations
         """
         self.signal_length = signal_length
         self.prob = prob
-    
-    def time_shift(self, x: torch.Tensor, max_shift: int = 50) -> torch.Tensor:
-        """Random time shift augmentation."""
-        if torch.rand(1) < self.prob:
-            shift = torch.randint(-max_shift, max_shift, (1,)).item()
-            if shift > 0:
-                x = F.pad(x, (shift, 0))[:, :self.signal_length]
-            elif shift < 0:
-                x = F.pad(x, (0, -shift))[:, -self.signal_length:]
-        return x
-    
-    def scale(self, x: torch.Tensor, scale_range: Tuple[float, float] = (0.8, 1.2)) -> torch.Tensor:
-        """Random amplitude scaling."""
-        if torch.rand(1) < self.prob:
-            scale = torch.empty(1).uniform_(*scale_range).item()
-            x = x * scale
-        return x
-    
-    def jitter(self, x: torch.Tensor, jitter_std: float = 0.001) -> torch.Tensor:
-        """Add Gaussian noise (jitter)."""
-        if torch.rand(1) < self.prob:
-            noise = torch.randn_like(x) * jitter_std
-            x = x + noise
-        return x
+        # Import here to avoid circular imports
+        from ssrl_ecg.augmentations import ECGAugmentations
+        self.augmentations = ECGAugmentations(signal_length=signal_length, prob_strong=prob)
     
     def __call__(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply augmentation pipeline to get two views.
+        """Apply advanced augmentation pipeline to get two views.
         
         Args:
-            x: Input tensor [channels, length]
+            x: Input tensor [batch?, channels, length]
         
         Returns:
             Tuple of two augmented views
         """
-        # First view
-        x1 = self.time_shift(x.clone())
-        x1 = self.scale(x1)
-        x1 = self.jitter(x1)
-        
-        # Second view (independent augmentations)
-        x2 = self.time_shift(x.clone())
-        x2 = self.scale(x2)
-        x2 = self.jitter(x2)
-        
-        return x1, x2
+        # Use the enhanced augmentation pipeline
+        return self.augmentations(x)
