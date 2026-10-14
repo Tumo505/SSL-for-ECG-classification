@@ -1,251 +1,166 @@
 #!/usr/bin/env python3
-"""
-Master orchestration script to run the complete SSL cardiovascular prediction experiments.
+"""Run the patient-separated ECG study on CUDA, Apple MPS or CPU.
 
-This script ensures all components are set up correctly and then runs the full pipeline:
-1. Label scarcity benchmark (SSL vs supervised)
-2. Cardiovascular improvements integration
-3. Results analysis and visualization
+Usage: .venv/bin/python run_experiments.py --smoke --device mps
+       .venv/bin/python run_experiments.py --device mps
+Interrupted runs resume at the last completed epoch using saved RNG state.
 """
 
-import sys
-from pathlib import Path
+import argparse
 import json
-from datetime import datetime
+import os
+from pathlib import Path
+import traceback
+
 import torch
+from filelock import FileLock
 
-# Setup paths
-PROJECT_ROOT = Path(__file__).parent
-CHECKPOINTS_DIR = PROJECT_ROOT / "checkpoints"
-RESULTS_DIR = PROJECT_ROOT / "label_scarcity_results"
-DATA_DIR = PROJECT_ROOT / "data" / "PTB-XL"
+from ssrl_ecg.augmentations import DOMAIN_TRANSFORMS
+from ssrl_ecg.data.ptbxl import DEFAULT_DATA_ROOT
+from ssrl_ecg.experiment import prepare_data, run_condition, write_json
+from ssrl_ecg.experiment_analysis import analyse
+from ssrl_ecg.utils import choose_device
 
-print("""
-ORCHESTRATION: SSL FOR CARDIOVASCULAR RISK PREDICTION
-Demonstrating Label Scarcity Benefits + Clinical-Grade Accuracy
-""")
 
-# === SYSTEM DIAGNOSTICS ===
-print("[SYSTEM DIAGNOSTICS]")
-print(f"  PyTorch version: {torch.__version__}")
-print(f"  CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"  GPU device: {torch.cuda.get_device_name(0)}")
-    print(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    print(f"  CUDA version: {torch.version.cuda}")
-print()
+def conditions():
+    result = [
+        {"name": "supervised", "method": "supervised"},
+        {"name": "simclr_generic", "method": "simclr", "policy": "generic"},
+        {"name": "simclr_domain", "method": "simclr", "policy": "domain"},
+        {"name": "byol_generic", "method": "byol", "policy": "generic"},
+        {"name": "byol_domain", "method": "byol", "policy": "domain"},
+        {"name": "clocs_cmsc", "method": "clocs"},
+    ]
+    result += [
+        {
+            "name": "simclr_without_" + t,
+            "method": "simclr",
+            "policy": "domain",
+            "exclude": t,
+        }
+        for t in DOMAIN_TRANSFORMS
+    ]
+    return result
 
-# === STEP 0: Verify Setup ===
-print("[STEP 0] Verifying project setup...")
-print(f"  Project root: {PROJECT_ROOT}")
-print(f"  Data directory: {DATA_DIR}")
-print(f"  Checkpoints: {CHECKPOINTS_DIR}")
-print(f"  Results: {RESULTS_DIR}")
 
-# Check required files
-required_files = [
-    CHECKPOINTS_DIR / "ssl_masked.pt",
-    DATA_DIR / "ptbxl_database.csv",
-    PROJECT_ROOT / "src" / "ssrl_ecg" / "label_scarcity_benchmark.py",
-    PROJECT_ROOT / "src" / "ssrl_ecg" / "models" / "cv_improvements.py",
-]
-
-missing_files = [f for f in required_files if not f.exists()]
-if missing_files:
-    print(f"\n[ERROR] Missing files:")
-    for f in missing_files:
-        print(f"  - {f}")
-    sys.exit(1)
-
-print("  [✓] All required files present")
-
-# Create results directory
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-print(f"  [✓] Results directory ready: {RESULTS_DIR}")
-
-# === STEP 1: Label Scarcity Benchmark ===
-print("\n[STEP 1] Running label scarcity benchmark...")
-print("  This will train models at different label fractions:")
-print("    - 1% labels (most extreme label scarcity)")
-print("    - 5% labels (severe label scarcity)")
-print("    - 10% labels (moderate label scarcity)")
-print("    - 25% labels (limited labels)")
-print("    - 100% labels (full dataset)")
-print("\n  For each fraction, we compare:")
-print("    ✓ Supervised: Train from scratch, no pre-training")
-print("    ✓ SSL Fine-tuned: Pre-trained + fine-tune all layers")
-print("    ✓ SSL Frozen: Pre-trained + freeze encoder (ablation)")
-print("\n  Running with 3 seeds (42, 52, 62) for statistical validity...")
-
-try:
-    from ssrl_ecg.label_scarcity_benchmark import LabelScarcityBenchmark
-    
-    benchmark = LabelScarcityBenchmark(
-        data_root=DATA_DIR,
-        checkpoint_dir=CHECKPOINTS_DIR,
-        results_dir=RESULTS_DIR
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", type=Path, default=Path("configs/experiment_study.json")
     )
-    
-    # Run full benchmark
-    print("\n  [] Starting benchmark (expected time: 2-3 hours)...")
-    benchmark.run_label_scarcity_benchmark(
-        label_fractions=[0.01, 0.05, 0.1, 0.25, 1.0],
-        seeds=[42, 52, 62],
-        epochs=50
+    parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--device", choices=("auto", "mps", "cpu", "cuda"), default="auto"
     )
-    
-    print("\n  [✓] Benchmark completed successfully!")
-    
-except Exception as e:
-    print(f"\n  [ERROR] Benchmark failed: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--seeds", type=int, nargs="+")
+    parser.add_argument("--conditions", nargs="+")
+    parser.add_argument("--pretrain-epochs", type=int)
+    parser.add_argument("--downstream-epochs", type=int)
+    parser.add_argument("--analyse-only", action="store_true")
+    args = parser.parse_args()
+    config = json.loads(args.config.read_text())
+    os.environ.setdefault(
+        "MPLCONFIGDIR", str(Path(config["cache_dir"]).resolve() / "matplotlib")
+    )
+    config["conditions"] = conditions()
+    if args.data_root:
+        config["data_root"] = str(args.data_root.resolve())
+    else:
+        config["data_root"] = str(DEFAULT_DATA_ROOT.resolve())
+    config["smoke"] = args.smoke
+    if args.smoke:
+        config.update(
+            pretrain_epochs=1, downstream_epochs=2, pretrain_batch_size=64, seeds=[42]
+        )
+    if args.seeds:
+        config["seeds"] = args.seeds
+    if args.conditions:
+        known = {c["name"] for c in config["conditions"]}
+        if set(args.conditions) - known:
+            parser.error("Unknown condition names")
+        config["conditions"] = [
+            c for c in config["conditions"] if c["name"] in args.conditions
+        ]
+    if args.pretrain_epochs:
+        config["pretrain_epochs"] = args.pretrain_epochs
+    if args.downstream_epochs:
+        config["downstream_epochs"] = args.downstream_epochs
+    if len(set(config["seeds"])) != len(config["seeds"]):
+        parser.error("Seeds must be unique")
+    if any(
+        config[k] < 1
+        for k in (
+            "pretrain_epochs",
+            "downstream_epochs",
+            "pretrain_batch_size",
+            "downstream_batch_size",
+        )
+    ):
+        parser.error("Budgets must be positive")
+    output = args.output_dir or Path(
+        "results/smoke" if args.smoke else "results/study"
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    if args.analyse_only:
+        study = json.loads((output / "study.json").read_text())
+        analyse(output, study["seeds"], [c["name"] for c in study["conditions"]])
+        return
+    torch.set_num_threads(config.get("cpu_threads", 4))
+    device = choose_device(args.device)
+    with FileLock(str(output / "study.lock"), timeout=0):
+        study = output / "study.json"
+        if study.exists() and json.loads(study.read_text()) != config:
+            raise ValueError(
+                "Existing study configuration differs; use another output directory"
+            )
+        write_json(study, config)
+        prepared = prepare_data(config)
+        names = [c["name"] for c in config["conditions"]]
+        print(
+            f"Running {len(names)*len(config['seeds'])} conditions/seeds on {device}. Output: {output.resolve()}",
+            flush=True,
+        )
+        # Rotate method order by seed to reduce systematic wall-time ordering effects.
+        for i, seed in enumerate(config["seeds"]):
+            ordered = (
+                config["conditions"][i % len(names) :]
+                + config["conditions"][: i % len(names)]
+            )
+            for condition in ordered:
+                run_dir = output / condition["name"] / f"seed_{seed}"
+                write_json(
+                    output / "status.json",
+                    {"status": "running", "condition": condition["name"], "seed": seed},
+                )
+                try:
+                    run_condition(config, condition, seed, run_dir, prepared, device)
+                except Exception as exc:
+                    write_json(
+                        output / "status.json",
+                        {
+                            "status": "failed",
+                            "condition": condition["name"],
+                            "seed": seed,
+                            "error": str(exc),
+                            "traceback": traceback.format_exc(),
+                        },
+                    )
+                    raise
+                analyse(output, config["seeds"], names, plots=False)
+        report = analyse(output, config["seeds"], names)
+        write_json(
+            output / "status.json",
+            {
+                "status": report["status"],
+                "completed_runs": sum(
+                    len(c["completed"]) for c in report["coverage"].values()
+                ),
+            },
+        )
+        print(f"Study {report['status']}. Read {output/'summary.json'}", flush=True)
 
-# === STEP 2: Load and Display Results ===
-print("\n[STEP 2] Loading benchmark results...")
-results_file = RESULTS_DIR / "label_scarcity_benchmark.json"
 
-if results_file.exists():
-    with open(results_file) as f:
-        results = json.load(f)
-    
-    print(f"\n[RESULTS SUMMARY] From {results_file}\n")
-    print("  Performance vs Label Fraction (AUROC):")
-    print("  " + "="*80)
-    print("  Label%  | Supervised | SSL Fine-tuned | SSL Frozen | Gain (FT)")
-    print("  " + "-"*80)
-    
-    for frac_key in sorted(results.keys(), key=lambda x: float(x.replace('%', ''))/100):
-        if frac_key.startswith('label_') or frac_key == 'metadata':
-            continue
-        
-        frac_data = results[frac_key]
-        
-        # Extract metrics
-        sup_auroc = frac_data.get('supervised', {}).get('auroc_mean', 0)
-        ft_auroc = frac_data.get('ssl_finetuned', {}).get('auroc_mean', 0)
-        frozen_auroc = frac_data.get('ssl_frozen', {}).get('auroc_mean', 0)
-        
-        if sup_auroc > 0:
-            gain = ((ft_auroc - sup_auroc) / sup_auroc * 100) if sup_auroc > 0 else 0
-            print(f"  {frac_key:^7} | {sup_auroc:^10.3f} | {ft_auroc:^14.3f} | {frozen_auroc:^10.3f} | +{gain:^6.1f}%")
-    
-    print("  " + "="*80)
-    print("\n  [Key Finding] SSL provides significant advantages at low label fractions:")
-    
-    # Find max gain
-    max_gain_frac = None
-    max_gain_value = 0
-    for frac_key in results.keys():
-        if frac_key.startswith('label_') or frac_key == 'metadata':
-            continue
-        frac_data = results[frac_key]
-        sup = frac_data.get('supervised', {}).get('auroc_mean', 0)
-        ft = frac_data.get('ssl_finetuned', {}).get('auroc_mean', 0)
-        gain = ((ft - sup) / sup * 100) if sup > 0 else 0
-        if gain > max_gain_value:
-            max_gain_value = gain
-            max_gain_frac = frac_key
-    
-    print(f"    → Maximum gain: +{max_gain_value:.1f}% at {max_gain_frac}")
-    print(f"    → Demonstrates critical SSL advantage under label scarcity")
-
-else:
-    print(f"  [WARNING] Results file not found: {results_file}")
-
-# === STEP 3: Generate Publication-Ready Figures ===
-print("\n[STEP 3] Generating visualizations...")
-try:
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    # Create figure showing AUROC progression
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Plot 1: AUROC vs Label Fraction
-    ax = axes[0]
-    label_fracs = []
-    sup_aurocs = []
-    ft_aurocs = []
-    frozen_aurocs = []
-    
-    for frac_key in sorted(results.keys(), key=lambda x: float(x.split('_')[1].replace('%', ''))/100):
-        if not frac_key.startswith('label_'):
-            continue
-        
-        frac_data = results[frac_key]
-        label_frac = float(frac_key.split('_')[1].replace('%', '')) / 100
-        label_fracs.append(label_frac)
-        sup_aurocs.append(frac_data.get('supervised', {}).get('auroc_mean', 0))
-        ft_aurocs.append(frac_data.get('ssl_finetuned', {}).get('auroc_mean', 0))
-        frozen_aurocs.append(frac_data.get('ssl_frozen', {}).get('auroc_mean', 0))
-    
-    ax.plot(label_fracs, sup_aurocs, 'o-', label='Supervised', linewidth=2, markersize=8)
-    ax.plot(label_fracs, ft_aurocs, 's-', label='SSL Fine-tuned', linewidth=2, markersize=8)
-    ax.plot(label_fracs, frozen_aurocs, '^-', label='SSL Frozen (Ablation)', linewidth=2, markersize=8)
-    ax.axhline(0.5, color='red', linestyle='--', alpha=0.5, label='Random baseline')
-    
-    ax.set_xlabel('Fraction of Labeled Data', fontsize=12)
-    ax.set_ylabel('AUROC', fontsize=12)
-    ax.set_title('SSL Advantage Under Label Scarcity', fontsize=14, fontweight='bold')
-    ax.set_xscale('log')
-    ax.set_ylim([0.4, 0.8])
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    
-    # Plot 2: Relative Improvement
-    ax = axes[1]
-    improvements = []
-    for sup, ft in zip(sup_aurocs, ft_aurocs):
-        if sup > 0:
-            improvement = ((ft - sup) / sup * 100)
-        else:
-            improvement = 0
-        improvements.append(improvement)
-    
-    ax.bar(range(len(label_fracs)), improvements, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
-    ax.set_xticks(range(len(label_fracs)))
-    ax.set_xticklabels([f'{int(f*100)}%' for f in label_fracs])
-    ax.set_xlabel('Fraction of Labeled Data', fontsize=12)
-    ax.set_ylabel('Relative AUROC Improvement (%)', fontsize=12)
-    ax.set_title('SSL Fine-tuned vs Supervised', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for i, v in enumerate(improvements):
-        ax.text(i, v + 1, f'+{v:.1f}%', ha='center', va='bottom', fontweight='bold')
-    
-    plt.tight_layout()
-    
-    # Save figure
-    fig_path = RESULTS_DIR / "label_scarcity_comparison.png"
-    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f"  [✓] Saved: {fig_path}")
-    plt.close()
-    
-except ImportError:
-    print("  [WARNING] Matplotlib not available - skipping visualization")
-except Exception as e:
-    print(f"  [WARNING] Visualization failed: {e}")
-
-# === STEP 4: Generate Summary Report ===
-print("\n[STEP 4] Generating summary report...")
-
-report_path = RESULTS_DIR / "RESULTS_SUMMARY.md"
-    
-
-print(f"  [✓] Saved: {report_path}")
-
-# === FINAL SUMMARY ===
-print("\n" + "="*80)
-print("[EXPERIMENT COMPLETE] SSL Cardiovascular Risk Prediction Validated")
-print("="*80)
-print(f"""
-Results Location: {RESULTS_DIR}
-  - label_scarcity_benchmark.json     [Raw results data]
-  - label_scarcity_comparison.png     [Publication-quality figure]
-  - RESULTS_SUMMARY.md                [This detailed report]
-""")
-
-print("\n[✓] All experiments completed successfully!")
+if __name__ == "__main__":
+    main()

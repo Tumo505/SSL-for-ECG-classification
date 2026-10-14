@@ -111,6 +111,20 @@ class ResNet1D(nn.Module):
         return x
 
 
+class ResNetEncoder(nn.Module):
+    """Residual backbone exposed to the common checkpoint/evaluation engine."""
+    def __init__(self):
+        super().__init__()
+        network = ResNet1D()
+        self.features = nn.Sequential(network.conv1, network.bn1, network.relu,
+                                      network.maxpool, network.layer1, network.layer2,
+                                      network.layer3, network.layer4)
+        self.out_channels = 512
+
+    def forward(self, x):
+        return self.features(x)
+
+
 if __name__ == "__main__":
     # Test model
     model = ResNet1D(in_channels=12, num_classes=5, width=64)

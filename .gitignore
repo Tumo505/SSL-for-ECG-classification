@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+Data/
 build/
 develop-eggs/
 dist/
@@ -48,6 +49,10 @@ venv.bak/
 
 # Datasets (large files)
 data/
+/Data/
+/physionet.org/
+!src/ssrl_ecg/data/
+!src/ssrl_ecg/data/*.py
 
 # Checkpoints and logs
 checkpoints/
@@ -72,3 +77,4 @@ Thumbs.db
 # Experiment outputs
 *.csv
 exp_logs/
+data_cache/

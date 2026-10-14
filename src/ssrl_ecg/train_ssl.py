@@ -7,14 +7,16 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ssrl_ecg.data.ptbxl import PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits
+from ssrl_ecg.data.ptbxl import DEFAULT_DATA_ROOT, PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits
 from ssrl_ecg.models.cnn import SSLReconstructionModel
 from ssrl_ecg.utils import apply_random_mask, choose_device, set_seed
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Self-supervised ECG pretraining with masked reconstruction.")
-    parser.add_argument("--data-root", type=Path, default=Path("data/PTB-XL"))
+    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
+    parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -28,7 +30,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
-    device = choose_device()
+    if args.epochs < 1 or args.batch_size < 1 or not 0 < args.mask_ratio < 1:
+        raise ValueError("Require positive budgets and mask ratio in (0, 1)")
+    device = choose_device(args.device)
+    torch.set_num_threads(4)
 
     db_df, labels = load_ptbxl_metadata(args.data_root)
     splits = make_default_splits(db_df)
@@ -37,7 +42,7 @@ def main() -> None:
         data_root=args.data_root,
         db_df=db_df,
         labels=labels,
-        indices=splits.train_idx,
+        indices=splits.train_idx[:128] if args.smoke else splits.train_idx,
         use_high_resolution=False,
         signal_length=args.signal_length,
         return_labels=False,
@@ -60,6 +65,8 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             x_hat = model(x_masked)
             loss = criterion(x_hat, x)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite reconstruction loss")
             loss.backward()
             optimizer.step()
 

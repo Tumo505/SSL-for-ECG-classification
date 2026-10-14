@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ssrl_ecg.data.ptbxl import DIAGNOSTIC_CLASSES, load_ptbxl_metadata, make_default_splits
+from ssrl_ecg.data.ptbxl import DEFAULT_DATA_ROOT, DIAGNOSTIC_CLASSES, load_ptbxl_metadata, make_default_splits
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Print dataset readiness and class stats for PTB-XL.")
-    parser.add_argument("--ptbxl-root", type=Path, default=Path("data/PTB-XL"))
+    parser.add_argument("--ptbxl-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--mitbih-root", type=Path, default=Path("data/MIT-BIH/files/mitdb/1.0.0"))
     return parser.parse_args()
 

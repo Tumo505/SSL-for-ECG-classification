@@ -44,7 +44,8 @@ class FocalLoss(nn.Module):
         p_t = torch.where(targets == 1, probs, 1 - probs)
         
         focal_weight = (1 - p_t) ** self.gamma
-        focal_loss = self.alpha * focal_weight * bce_loss
+        alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+        focal_loss = alpha_t * focal_weight * bce_loss
         
         return focal_loss.mean()
 
@@ -57,13 +58,13 @@ class ClinicalClassWeighting:
     3. Diagnostic difficulty
     """
     
-    # Clinical importance scores (based on mortality/morbidity)
+    # Illustrative, unvalidated class-priority scores; these are not mortality estimates
     CLINICAL_IMPORTANCE = {
         "NORM": 1.0,     # Normal: baseline
-        "MI": 3.0,       # Myocardial infarction: high risk (mortality 5-10%)
+        "MI": 3.0,       # Illustrative MI priority
         "STTC": 2.0,     # ST-T changes: moderate risk
         "HYP": 2.5,      # Hypertrophy (left ventricular): moderate-high risk
-        "CD": 3.5,       # Cardiomyopathy: highest risk (mortality 25-50%)
+        "CD": 3.5,       # Conduction disturbance priority (unvalidated)
     }
     
     @staticmethod

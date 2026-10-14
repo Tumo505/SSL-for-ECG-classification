@@ -44,7 +44,9 @@ class FocalLoss(nn.Module):
         focal_weight = (1 - p_t) ** self.gamma
         
         # Apply focal weighting
-        focal_loss = self.alpha * focal_weight * ce_loss
+        alpha = torch.as_tensor(self.alpha, dtype=logits.dtype, device=logits.device)
+        alpha_t = torch.where(targets == 1, alpha, 1 - alpha)
+        focal_loss = alpha_t * focal_weight * ce_loss
         
         if self.reduction == "mean":
             return focal_loss.mean()

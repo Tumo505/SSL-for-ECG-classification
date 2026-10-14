@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ssrl_ecg.data.ptbxl import PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits
+from ssrl_ecg.data.ptbxl import DEFAULT_DATA_ROOT, PTBXLRecordDataset, load_ptbxl_metadata, make_default_splits
 from ssrl_ecg.models.cnn import ECGClassifier, ECGEncoder1DCNN
-from ssrl_ecg.utils import choose_device, multilabel_metrics
+from ssrl_ecg.utils import choose_device, multilabel_metrics, set_seed
 
 
 class CorruptedWrapper(torch.utils.data.Dataset):
@@ -35,7 +35,10 @@ class CorruptedWrapper(torch.utils.data.Dataset):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate PTB-XL model under clean/noisy/masked conditions.")
-    parser.add_argument("--data-root", type=Path, default=Path("data/PTB-XL"))
+    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--signal-length", type=int, default=1000)
@@ -46,17 +49,35 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = choose_device()
+    if args.noise_std < 0 or not 0 <= args.mask_ratio <= 1:
+        raise ValueError("Invalid corruption parameters")
+    set_seed(args.seed)
+    device = choose_device(args.device)
 
     db_df, labels = load_ptbxl_metadata(args.data_root)
     splits = make_default_splits(db_df)
 
-    base_ds = PTBXLRecordDataset(args.data_root, db_df, labels, splits.test_idx, signal_length=args.signal_length)
+    indices = splits.test_idx[labels[splits.test_idx].sum(1)>0]
+    if args.smoke:
+        indices = indices[:128]
+    base_ds = PTBXLRecordDataset(args.data_root, db_df, labels, indices,
+                               use_high_resolution=args.signal_length == 5000, signal_length=args.signal_length)
     test_ds = CorruptedWrapper(base_ds, noise_std=args.noise_std, mask_ratio=args.mask_ratio)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model = ECGClassifier(encoder=ECGEncoder1DCNN(in_ch=12, width=64), n_classes=labels.shape[1]).to(device)
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    from ssrl_ecg.models.resnet1d import ResNetEncoder
+    from ssrl_ecg.models.clocs import ReferenceCLOCSEncoder
+    state = ckpt["model"]
+    if "encoder.embedding.weight" in state:
+        encoder = ReferenceCLOCSEncoder()
+        if args.signal_length != 5000:
+            raise ValueError("Reference CLOCS evaluation requires --signal-length 5000")
+    elif "encoder.features.7.0.conv1.weight" in state:
+        encoder = ResNetEncoder()
+    else:
+        encoder = ECGEncoder1DCNN(in_ch=12, width=64)
+    model = ECGClassifier(encoder=encoder, n_classes=labels.shape[1]).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

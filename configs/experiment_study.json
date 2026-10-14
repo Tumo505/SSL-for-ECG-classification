@@ -1,0 +1,23 @@
+{
+  "sampling_rate": 100,
+  "cache_dir": "data_cache",
+  "label_fraction": 0.1,
+  "seeds": [42,52,62,72,82,92,102,112,122,132],
+  "pretrain_epochs": 20,
+  "pretrain_batch_size": 128,
+  "pretrain_lr": 0.001,
+  "temperature": 0.07,
+  "clocs_temperature": 0.1,
+  "momentum_tau": 0.999,
+  "downstream_epochs": 20,
+  "downstream_batch_size": 64,
+  "downstream_lr": 0.001,
+  "loss": "focal",
+  "focal_alpha": 0.25,
+  "balance_strategy": "oversample",
+  "freeze_encoder": true,
+  "cpu_threads": 4,
+  "selection_metric": "validation_macro_f1_at_0.5",
+  "primary_metric": "test_macro_f1_at_0.5",
+  "secondary_metric": "test_macro_auroc"
+}
